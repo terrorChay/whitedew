@@ -97,15 +97,16 @@ async def on_join_chat(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
     keyboard = ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="✅ Согласен"), KeyboardButton(text="❌ Не согласен")]
+            [KeyboardButton(text="❌ Не согласен"), KeyboardButton(text="✅ Согласен")]
         ],
         resize_keyboard=True,
         one_time_keyboard=True
     )
     await state.set_state(JoinChat.consent_share_flat)
     await callback.message.answer(
-        "Пожалуйста, подтвердите согласие на обработку номера вашей квартиры и данных Telegram-аккаунта. Это необходимо для проверки подлинности соседства и добавления вас в чат",
-        reply_markup=keyboard
+        f"Пожалуйста, подтвердите согласие на обработку номера вашей квартиры и данных Telegram-аккаунта. Это необходимо для проверки подлинности соседства и добавления вас в чат.\n\nПолитика конфиденциальности: https://clck.ru/3NqANx",
+        reply_markup=keyboard,
+        disable_web_page_preview=True
     )
 
 
