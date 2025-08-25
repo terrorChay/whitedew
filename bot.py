@@ -1,7 +1,7 @@
 from supabase import create_client, Client
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ChatMemberUpdated
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
@@ -286,6 +286,70 @@ async def on_chat_member_update(update: ChatMemberUpdated):
                 
         except Exception as e:
             logging.error(f"Error removing user data when leaving group: {e}")
+
+
+# /revoke: user-initiated data deletion (private only)
+@dp.message(Command("revoke"), F.chat.type == "private")
+async def revoke_request(message: Message):
+    keyboard = InlineKeyboardBuilder()
+    keyboard.button(text="❌ Отмена", callback_data="revoke_cancel")
+    keyboard.button(text="✅ Подтвердить", callback_data="revoke_confirm")
+    keyboard.adjust(1)
+    warn_text = (
+        "Внимание: удаление ваших данных приведет к вашему удалению из чатов соседей.\n\n"
+        "Вы действительно хотите отозвать согласие на обработку данных и удалить свои данные?"
+    )
+    await message.answer(warn_text, reply_markup=keyboard.as_markup())
+
+
+@dp.callback_query(F.data == "revoke_cancel")
+async def revoke_cancel(callback: types.CallbackQuery):
+    await callback.answer()
+    await callback.message.edit_text("Операция отменена.")
+
+
+@dp.callback_query(F.data == "revoke_confirm")
+async def revoke_confirm(callback: types.CallbackQuery):
+    await callback.answer()
+    user_id = callback.from_user.id
+
+    # Delete user data from Supabase
+    try:
+        user_flats = supabase.table("users").select("*").eq("telegram_id", user_id).execute()
+        deleted_count = 0
+        if user_flats.data:
+            supabase.table("users").delete().eq("telegram_id", user_id).execute()
+            deleted_count = len(user_flats.data)
+    except Exception as e:
+        logging.error(f"Revoke: error deleting user data: {e}")
+        await callback.message.edit_text(
+            "Произошла ошибка при удалении данных. Попробуйте позже или обратитесь к разработчику @xmlChay (Илья)"
+        )
+        return
+
+    # Try to remove the user from all configured group chats
+    removed_from = 0
+    for chat_id in GROUP_CHAT_IDS.values():
+        try:
+            await bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
+            await bot.unban_chat_member(chat_id=chat_id, user_id=user_id, only_if_banned=True)
+            removed_from += 1
+        except Exception as err:
+            # Might fail if bot is not admin or user not in the chat; ignore per chat
+            logging.info(f"Revoke: could not remove user {user_id} from chat {chat_id}: {err}")
+            continue
+
+    await callback.message.edit_text(
+        (
+            "Ваши данные удалены. "
+            + (f"Удалено записей: {deleted_count}. " if deleted_count else "")
+            + (
+                f"Вы удалены из {removed_from} чата(ов)."
+                if removed_from
+                else "Не удалось удаленно исключить из чатов или вы не были участником."
+            )
+        )
+    )
 
 
 async def main():
