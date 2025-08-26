@@ -10,8 +10,6 @@ import logging
 import os
 import json
 from dotenv import load_dotenv
-from aiohttp import web  # Added for webhook support
-
 load_dotenv()
 
 # Supabase
@@ -21,11 +19,6 @@ supabase: Client = create_client(url, key)
 
 # Telegram
 TELEGRAM_KEY = os.environ.get("TELEGRAM_KEY")
-# Webhook configuration - Set WEBHOOK_HOST in Render env vars to your app's URL (e.g., https://your-app.onrender.com)
-WEBHOOK_HOST = os.environ.get("WEBHOOK_HOST")
-WEBHOOK_PATH = f'/{TELEGRAM_KEY}'  # Secure path with token
-WEBHOOK_URL = f'{WEBHOOK_HOST}{WEBHOOK_PATH}'
-
 # Example formats for GROUP_CHAT_IDS env:
 # JSON: {"2": -1001234567890, "2к1": -1002345678901}
 # Python dict: {'2': -1001234567890, '2к1': -1002345678901}
@@ -360,48 +353,8 @@ async def revoke_confirm(callback: types.CallbackQuery):
     )
 
 
-# Webhook handler
-async def webhook(request: web.Request):
-    if request.match_info.get('token') != TELEGRAM_KEY:
-        return web.Response(status=403)
-    
-    try:
-        update = types.Update(**(await request.json()))
-        await dp.process_update(update)
-        return web.Response()
-    except Exception as e:
-        logging.error(f"Error processing update: {e}")
-        return web.Response(status=500)
-
-
-# Startup: set webhook
-async def on_startup(app: web.Application):
-    try:
-        await bot.delete_webhook(drop_pending_updates=True)
-        allowed_updates = dp.resolve_used_update_types()
-        await bot.set_webhook(WEBHOOK_URL, allowed_updates=allowed_updates)
-        logging.info(f"Webhook set to {WEBHOOK_URL}")
-    except Exception as e:
-        logging.error(f"Error setting webhook: {e}")
-
-
-# Shutdown: clean up
-async def on_shutdown(app: web.Application):
-    await bot.delete_webhook()
-    await bot.session.close()
-    logging.info("Webhook deleted and session closed")
-
-
 async def main():
-    app = web.Application()
-    app.router.add_post('/{token}', webhook)
-    app.router.add_get('/', lambda req: web.Response(text="Bot is running"))  # Optional health check endpoint
-    
-    app.on_startup.append(on_startup)
-    app.on_shutdown.append(on_shutdown)
-    
-    port = int(os.environ.get('PORT', 8080))
-    web.run_app(app, host='0.0.0.0', port=port)
+    await dp.start_polling(bot)
 
 if __name__ == '__main__':
     asyncio.run(main())
