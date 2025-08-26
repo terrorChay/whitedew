@@ -1,3 +1,5 @@
+from background_worker import keep_alive
+keep_alive()
 from supabase import create_client, Client
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ChatMemberUpdated
@@ -352,9 +354,9 @@ async def revoke_confirm(callback: types.CallbackQuery):
         )
     )
 
-
 async def main():
     await dp.start_polling(bot)
 
+keep_alive()
 if __name__ == '__main__':
     asyncio.run(main())
