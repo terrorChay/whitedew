@@ -252,21 +252,6 @@ async def on_flat_number(message: Message, state: FSMContext):
         # Always produce an invite link regardless of DB path
         invite_link = await create_one_time_invite_link(building)
 
-        # Notify admins about the invite creation with user data
-        try:
-            admin_chat_id = resolve_building_admin_chat_id(building)
-            if admin_chat_id and invite_link:
-                admin_text = (
-                    "🆕 Новое приглашение в чат соседей\n\n"
-                    f"Дом: {building}\n"
-                    f"Квартира: {flat_number}\n"
-                    f"Пользователь: @{username if username else '—'} (ID: {telegram_id})\n"
-                    f"Имя: {first_name} {last_name}".strip()
-                )
-                await bot.send_message(chat_id=admin_chat_id, text=admin_text)
-        except Exception as admin_notify_err:
-            logging.error(f"Error notifying admins for building {building}: {admin_notify_err}")
-
         # Build base response once
         def build_response(prefix: str) -> str:
             text = prefix
@@ -348,6 +333,57 @@ async def on_chat_member_update(update: ChatMemberUpdated):
                 
         except Exception as e:
             logging.error(f"Error removing user data when leaving group: {e}")
+
+    # Check if user joined the chat
+    if update.old_chat_member.status in ["left", "kicked"] and update.new_chat_member.status in ["member", "administrator", "creator"]:
+        building = resolve_chat_building(update.chat.id)
+        if building is None:
+            return
+
+        user_id = update.new_chat_member.user.id
+        username = update.new_chat_member.user.username or "Unknown"
+        first_name = update.new_chat_member.user.first_name or "Unknown"
+        last_name = update.new_chat_member.user.last_name or ""
+
+        try:
+            # Fetch user data for this building, if any
+            user_flats = (
+                supabase
+                .table("users")
+                .select("*")
+                .eq("telegram_id", user_id)
+                .eq("building", building)
+                .execute()
+            )
+
+            admin_chat_id = resolve_building_admin_chat_id(building)
+            if not admin_chat_id:
+                return
+
+            if user_flats.data:
+                flats_lines = []
+                for rec in user_flats.data:
+                    flat_no = rec.get("flat_number", "—")
+                    flats_lines.append(f"Квартира: {flat_no}")
+                flats_text = "\n".join(flats_lines)
+                msg = (
+                    "✅ Пользователь присоединился к чату\n\n"
+                    f"Дом: {building}\n"
+                    f"Пользователь: @{username if username != 'Unknown' else '—'} (ID: {user_id})\n"
+                    f"Имя: {first_name} {last_name}".strip() + "\n\n"
+                    f"Данные: \n{flats_text}"
+                )
+            else:
+                msg = (
+                    "ℹ️ Пользователь присоединился к чату, но данные не найдены в базе\n\n"
+                    f"Дом: {building}\n"
+                    f"Пользователь: @{username if username != 'Unknown' else '—'} (ID: {user_id})\n"
+                    f"Имя: {first_name} {last_name}".strip()
+                )
+
+            await bot.send_message(chat_id=admin_chat_id, text=msg)
+        except Exception as e:
+            logging.error(f"Error notifying admins about user join: {e}")
 
 
 # /revoke: user-initiated data deletion (private only)
