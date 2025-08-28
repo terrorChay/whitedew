@@ -41,6 +41,24 @@ except Exception:
     logging.error("GROUP_CHAT_IDS contains non-numeric chat ids; please use integers (e.g., -1001234567890)")
     GROUP_CHAT_IDS = {}
 
+# Admin chats (per building), same format as GROUP_CHAT_IDS
+ADMIN_CHAT_IDS_RAW = os.environ.get("ADMIN_CHAT_IDS", "{}")
+try:
+    admin_parsed_mapping = json.loads(ADMIN_CHAT_IDS_RAW)
+except Exception:
+    try:
+        import ast
+        admin_parsed_mapping = ast.literal_eval(ADMIN_CHAT_IDS_RAW)
+    except Exception:
+        logging.error("Failed to parse ADMIN_CHAT_IDS env variable. Provide JSON or Python dict mapping of building->chat_id")
+        admin_parsed_mapping = {}
+
+try:
+    ADMIN_CHAT_IDS: dict[str, int] = {str(k): int(v) for k, v in dict(admin_parsed_mapping).items()}
+except Exception:
+    logging.error("ADMIN_CHAT_IDS contains non-numeric chat ids; please use integers (e.g., -1001234567890)")
+    ADMIN_CHAT_IDS = {}
+
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TELEGRAM_KEY)
 dp = Dispatcher()
@@ -55,6 +73,10 @@ def resolve_chat_building(chat_id: int) -> str | None:
         if configured_chat_id == chat_id:
             return building_name
     return None
+
+
+def resolve_building_admin_chat_id(building: str) -> int | None:
+    return ADMIN_CHAT_IDS.get(building)
 
 
 async def create_one_time_invite_link(building: str) -> str | None:
@@ -229,6 +251,21 @@ async def on_flat_number(message: Message, state: FSMContext):
 
         # Always produce an invite link regardless of DB path
         invite_link = await create_one_time_invite_link(building)
+
+        # Notify admins about the invite creation with user data
+        try:
+            admin_chat_id = resolve_building_admin_chat_id(building)
+            if admin_chat_id and invite_link:
+                admin_text = (
+                    "🆕 Новое приглашение в чат соседей\n\n"
+                    f"Дом: {building}\n"
+                    f"Квартира: {flat_number}\n"
+                    f"Пользователь: @{username if username else '—'} (ID: {telegram_id})\n"
+                    f"Имя: {first_name} {last_name}".strip()
+                )
+                await bot.send_message(chat_id=admin_chat_id, text=admin_text)
+        except Exception as admin_notify_err:
+            logging.error(f"Error notifying admins for building {building}: {admin_notify_err}")
 
         # Build base response once
         def build_response(prefix: str) -> str:
