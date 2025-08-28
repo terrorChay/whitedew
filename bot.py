@@ -50,6 +50,13 @@ def resolve_building_chat_id(building: str) -> int | None:
     return GROUP_CHAT_IDS.get(building)
 
 
+def resolve_chat_building(chat_id: int) -> str | None:
+    for building_name, configured_chat_id in GROUP_CHAT_IDS.items():
+        if configured_chat_id == chat_id:
+            return building_name
+    return None
+
+
 async def create_one_time_invite_link(building: str) -> str | None:
     try:
         chat_id = resolve_building_chat_id(building)
@@ -261,25 +268,40 @@ async def on_chat_member_update(update: ChatMemberUpdated):
     
     # Check if user left the chat
     if update.old_chat_member.status in ["member", "administrator", "creator"] and update.new_chat_member.status == "left":
-        user_id = update.from_user.id
-        username = update.from_user.username or "Unknown"
+        building = resolve_chat_building(update.chat.id)
+        if building is None:
+            return
+
+        # The affected user is the one in new_chat_member
+        user_id = update.new_chat_member.user.id
+        username = update.new_chat_member.user.username or "Unknown"
         
         try:
-            # Get all flats for this user
-            user_flats = supabase.table("users").select("*").eq("telegram_id", user_id).execute()
+            # Get all flats for this user in this building only
+            user_flats = (
+                supabase
+                .table("users")
+                .select("*")
+                .eq("telegram_id", user_id)
+                .eq("building", building)
+                .execute()
+            )
             
             if user_flats.data:
-                # Delete all flats for this user
-                result = supabase.table("users").delete().eq("telegram_id", user_id).execute()
+                # Delete only flats for this user in this building
+                supabase.table("users").delete().eq("telegram_id", user_id).eq("building", building).execute()
                 
-                logging.info(f"User {username} (ID: {user_id}) left the group. Removed {len(user_flats.data)} flat(s) from database.")
+                logging.info(
+                    f"User {username} (ID: {user_id}) left chat {update.chat.id} ({building}). "
+                    f"Removed {len(user_flats.data)} flat(s) for this building from database."
+                )
                 
                 # Notify user in private message about data deletion
                 try:
                     await bot.send_message(
                         chat_id=user_id,
-                        text=f"👋 {username or 'Пользователь'}, вы покинули чат соседей.\n\n"
-                             f"Ваши данные ({len(user_flats.data)} квартир(а)) были удалены из базы данных "
+                        text=f"👋 {username or 'Пользователь'}, вы покинули чат соседей по дому {building}.\n\n"
+                             f"Ваши данные по этому дому ({len(user_flats.data)} квартир(а)) были удалены из базы данных "
                              f"в соответствии с политикой конфиденциальности.\n\n"
                              f"Если вы захотите вернуться в чат, просто начните заново с команды /start"
                     )
