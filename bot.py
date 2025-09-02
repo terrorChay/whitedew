@@ -79,6 +79,13 @@ def resolve_building_admin_chat_id(building: str) -> int | None:
     return ADMIN_CHAT_IDS.get(building)
 
 
+def resolve_admin_chat_building(chat_id: int) -> str | None:
+    for building_name, configured_chat_id in ADMIN_CHAT_IDS.items():
+        if configured_chat_id == chat_id:
+            return building_name
+    return None
+
+
 async def create_one_time_invite_link(building: str) -> str | None:
     try:
         chat_id = resolve_building_chat_id(building)
@@ -101,6 +108,7 @@ async def handle_start_command(message: Message):
     keyboard = InlineKeyboardBuilder()
     keyboard.button(text="ℹ️ Узнать о доме", callback_data="start_get_info")
     keyboard.button(text="💬 Вступить в чат", callback_data="start_join_chat")
+    keyboard.button(text="🚨 Сообщить об аварии", callback_data="start_report_emergency")
     keyboard.adjust(2)
     await message.answer(
         "👋 Привет! Я бот-помощник для соседей. Выберите действие:",
@@ -120,6 +128,21 @@ class JoinChat(StatesGroup):
 async def on_get_info(callback: types.CallbackQuery):
     await callback.answer()
     await callback.message.answer("⚒️ Раздел в разработке...")
+
+
+# Callback: 🚨 Сообщить об аварии
+@dp.callback_query(F.data == "start_report_emergency")
+async def on_report_emergency(callback: types.CallbackQuery):
+    await callback.answer()
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Госуслуги.Дом", url="https://www.gosuslugi.ru/landing/mp_dom")
+    kb.button(text="Добродел", url="https://dobrodel.mosreg.ru")
+    kb.adjust(2)
+    await callback.message.answer(
+        "Сообщить об аварии, некачественном содержании дома и двора можно в сервисах:",
+        reply_markup=kb.as_markup(),
+        disable_web_page_preview=True
+    )
 
 
 # Callback: 💬 Вступить в чат
@@ -261,7 +284,7 @@ async def on_flat_number(message: Message, state: FSMContext):
             if invite_link:
                 text += f"\n\n🔗 Ссылка для вступления в чат: {invite_link}"
             else:
-                text += "\n\nНе удалось создать ссылку приглашения. Свяжитесь с администратором @xmlChay (Илья)"
+                text += "\n\nНе удалось создать ссылку приглашения. Попробуйте позже или обратитесь к разработчику @xmlChay (Илья)"
             return text
 
         response = build_response(f"Готово! Дом {building}, квартира {flat_number}.")
@@ -279,6 +302,72 @@ async def on_flat_number(message: Message, state: FSMContext):
 @dp.message(JoinChat.awaiting_flat_number)
 async def on_flat_number_invalid(message: Message):
     await message.answer("Пожалуйста, укажите корректный номер квартиры")
+
+
+# /flat: show users bound to a flat (admin chats only)
+@dp.message(Command("flat"))
+async def handle_flat_command(message: Message):
+    # Restrict to admin chats only
+    admin_building = resolve_admin_chat_building(message.chat.id)
+    if not admin_building:
+        return
+
+    # Parse flat number from command arguments
+    # Expected formats:
+    #   /flat 123
+    #   /flat@bot 123
+    args_text = message.text.split(maxsplit=1)
+    if len(args_text) < 2 or not args_text[1].strip().isdigit():
+        await message.answer("Укажите номер квартиры: например, /flat 123")
+        return
+
+    flat_number = args_text[1].strip()
+
+    try:
+        # Query all users for this flat in this building
+        result = (
+            supabase
+            .table("users")
+            .select("*")
+            .eq("building", admin_building)
+            .eq("flat_number", flat_number)
+            .execute()
+        )
+
+        if not result.data:
+            await message.answer(
+                "Данные не найдены в базе\n\n"
+                f"Дом: {admin_building}\n"
+                f"Квартира: {flat_number}"
+            )
+            return
+
+        # Build message similar to join notification but for flat lookup
+        lines = [
+            "ℹ️ Данные по квартире",
+            "",
+            f"Дом: {admin_building}",
+            f"Квартира: {flat_number}",
+            "",
+            "Пользователи:",
+        ]
+
+        for rec in result.data:
+            user_id = rec.get("telegram_id")
+            username = rec.get("username") or "Unknown"
+            first_name = rec.get("first_name") or "Unknown"
+            last_name = rec.get("last_name") or ""
+            user_line = (
+                f"@{username if username != 'Unknown' else '—'} (ID: {user_id})\n"
+                f"Имя: {first_name} {last_name}".strip()
+            )
+            lines.append(user_line)
+            lines.append("")
+
+        await message.answer("\n".join(lines).strip())
+    except Exception as e:
+        logging.error(f"/flat: error fetching data: {e}")
+        await message.answer("Произошла ошибка при получении данных. Попробуйте позже или обратитесь к разработчику @xmlChay (Илья)")
 
 
 # Chat member update handler - detect when users leave the group
