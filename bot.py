@@ -108,7 +108,7 @@ async def handle_start_command(message: Message):
     keyboard = InlineKeyboardBuilder()
     keyboard.button(text="ℹ️ Узнать о доме", callback_data="start_get_info")
     keyboard.button(text="💬 Вступить в чат", callback_data="start_join_chat")
-    keyboard.button(text="🚨 Сообщить об аварии", callback_data="start_report_emergency")
+    keyboard.button(text="🚨 Сообщить о проблеме в доме", callback_data="start_report_emergency")
     keyboard.adjust(2)
     await message.answer(
         "👋 Привет! Я бот-помощник для соседей. Выберите действие:",
@@ -137,6 +137,7 @@ async def on_report_emergency(callback: types.CallbackQuery):
     kb = InlineKeyboardBuilder()
     kb.button(text="Госуслуги.Дом", url="https://www.gosuslugi.ru/landing/mp_dom")
     kb.button(text="Добродел", url="https://dobrodel.mosreg.ru")
+    kb.button(text="Единая диспетчерская служба", url="https://eds.mosreg.ru/")
     kb.adjust(2)
     await callback.message.answer(
         "Сообщить об аварии, некачественном содержании дома и двора можно в сервисах:",
