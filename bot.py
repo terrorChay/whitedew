@@ -86,6 +86,19 @@ def resolve_admin_chat_building(chat_id: int) -> str | None:
     return None
 
 
+async def is_user_in_building_chat(building: str, user_id: int) -> bool:
+    chat_id = resolve_building_chat_id(building)
+    if chat_id is None:
+        return False
+    try:
+        member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
+        status = getattr(member, "status", None)
+        return status in ["member", "administrator", "creator"]
+    except Exception as err:
+        logging.info(f"Membership check failed for user {user_id} in building {building}: {err}")
+        return False
+
+
 async def create_one_time_invite_link(building: str) -> str | None:
     try:
         chat_id = resolve_building_chat_id(building)
@@ -273,8 +286,11 @@ async def on_flat_number(message: Message, state: FSMContext):
                 logging.error(f"Insert failed (continuing as duplicate-safe): {insert_err}")
                 # If a UNIQUE constraint exists server-side, treat as duplicate and continue
 
-        # Always produce an invite link regardless of DB path
-        invite_link = await create_one_time_invite_link(building)
+        # Check if user already in chat; only create invite if not
+        user_already_in_chat = await is_user_in_building_chat(building, telegram_id)
+        invite_link = None
+        if not user_already_in_chat:
+            invite_link = await create_one_time_invite_link(building)
 
         # Build base response once
         def build_response(prefix: str) -> str:
@@ -282,10 +298,13 @@ async def on_flat_number(message: Message, state: FSMContext):
             if resolve_building_chat_id(building) is None:
                 text += "\n\nК сожалению, чат для этого дома пока не подключен. Свяжитесь с администратором @xmlChay (Илья)."
                 return text
-            if invite_link:
-                text += f"\n\n🔗 Ссылка для вступления в чат: {invite_link}"
+            if user_already_in_chat:
+                text += "\n\nВы уже состоите в чате этого дома. Приглашение не требуется."
             else:
-                text += "\n\nНе удалось создать ссылку приглашения. Попробуйте позже или обратитесь к разработчику @xmlChay (Илья)"
+                if invite_link:
+                    text += f"\n\n🔗 Ссылка для вступления в чат: {invite_link}"
+                else:
+                    text += "\n\nНе удалось создать ссылку приглашения. Попробуйте позже или обратитесь к разработчику @xmlChay (Илья)"
             return text
 
         response = build_response(f"Готово! Дом {building}, квартира {flat_number}.")
