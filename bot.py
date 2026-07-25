@@ -2,7 +2,7 @@ from background_worker import keep_alive
 keep_alive()
 from supabase import create_client, Client
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ChatMemberUpdated
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ChatMemberUpdated, ChatJoinRequest
 from aiogram.filters import CommandStart, Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
@@ -217,15 +217,21 @@ async def on_report_emergency(callback: types.CallbackQuery):
     )
 
 
+def has_user_record(telegram_id: int, building: str | None = None) -> bool:
+    try:
+        query = supabase.table("users").select("id").eq("telegram_id", telegram_id)
+        if building is not None:
+            query = query.eq("building", building)
+        return bool(query.limit(1).execute().data)
+    except Exception as err:
+        # Treat a lookup failure as "no record": ask again instead of trusting a broken check
+        logging.error(f"Record lookup failed for user {telegram_id}: {err}")
+        return False
+
+
 # Consent is remembered through the records the user already has in the database
 def has_given_consent(telegram_id: int) -> bool:
-    try:
-        result = supabase.table("users").select("id").eq("telegram_id", telegram_id).limit(1).execute()
-        return bool(result.data)
-    except Exception as err:
-        # Ask for consent again rather than assume it was given
-        logging.error(f"Consent check failed for user {telegram_id}: {err}")
-        return False
+    return has_user_record(telegram_id)
 
 
 async def prompt_building_selection(message: Message, state: FSMContext, intro: str | None = None) -> None:
@@ -543,11 +549,41 @@ async def handle_kick_command(message: Message):
     await answer_admin_privately(message, f"🚫 {chat_title}: пользователь {target_name} исключен")
 
 
+# Join requests: approve the residents the bot has already verified, leave the rest to admins
+@dp.chat_join_request()
+async def on_chat_join_request(request: ChatJoinRequest):
+    if not is_connected_chat(request.chat.id):
+        return
+
+    chat_title = resolve_chat_title(request.chat.id)
+    user_name = format_user_name(request.from_user)
+    user_id = request.from_user.id
+
+    # A building chat is only for residents of that building; the shared chat is for anyone registered
+    building = resolve_chat_building(request.chat.id)
+    if not has_user_record(user_id, building):
+        logging.info(
+            f"Join request from {user_name} (ID: {user_id}) to {chat_title} left for manual review: "
+            f"no matching record in the database"
+        )
+        return
+
+    try:
+        await bot.approve_chat_join_request(chat_id=request.chat.id, user_id=user_id)
+        logging.info(f"Approved join request from {user_name} (ID: {user_id}) to {chat_title}")
+    except Exception as err:
+        logging.error(f"Failed to approve join request from {user_id} to {chat_title}: {err}")
+
+
 # Chat member update handler - detect when users leave the group
 @dp.chat_member()
 async def on_chat_member_update(update: ChatMemberUpdated):
     # Only process updates for the building chats and the shared complex chat
     if not is_connected_chat(update.chat.id):
+        logging.info(
+            f"Ignoring chat_member update from unconfigured chat {update.chat.id} "
+            f"({update.chat.title}); check GROUP_CHAT_IDS and PUBLIC_CHAT_ID"
+        )
         return
     
     # Check if user is no longer in the chat, whether they left or were removed
@@ -640,7 +676,7 @@ async def on_chat_member_update(update: ChatMemberUpdated):
                 )
             )
         except Exception as e:
-            logging.error(f"Error welcoming user in chat: {e}")
+            logging.error(f"Error welcoming user in chat {update.chat.id} ({resolve_chat_title(update.chat.id)}): {e}")
 
 
 # /revoke: user-initiated data deletion (private only)
@@ -707,6 +743,10 @@ async def revoke_confirm(callback: types.CallbackQuery):
     )
 
 async def main():
+    logging.info(
+        "Effective configuration: buildings=%s, building chats=%s, public chat=%s, owners=%s",
+        BUILDINGS, GROUP_CHAT_IDS, PUBLIC_CHAT_ID, sorted(OWNER_IDS)
+    )
     await dp.start_polling(bot)
 
 keep_alive()
