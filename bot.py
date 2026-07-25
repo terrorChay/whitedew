@@ -41,23 +41,14 @@ except Exception:
     logging.error("GROUP_CHAT_IDS contains non-numeric chat ids; please use integers (e.g., -1001234567890)")
     GROUP_CHAT_IDS = {}
 
-# Admin chats (per building), same format as GROUP_CHAT_IDS
-ADMIN_CHAT_IDS_RAW = os.environ.get("ADMIN_CHAT_IDS", "{}")
+# Users allowed to run admin commands in any building chat, regardless of their status there
+# Example format for OWNER_IDS env: 230720971,987654321
+OWNER_IDS_RAW = os.environ.get("OWNER_IDS", "")
 try:
-    admin_parsed_mapping = json.loads(ADMIN_CHAT_IDS_RAW)
+    OWNER_IDS: set[int] = {int(part.strip()) for part in OWNER_IDS_RAW.split(",") if part.strip()}
 except Exception:
-    try:
-        import ast
-        admin_parsed_mapping = ast.literal_eval(ADMIN_CHAT_IDS_RAW)
-    except Exception:
-        logging.error("Failed to parse ADMIN_CHAT_IDS env variable. Provide JSON or Python dict mapping of building->chat_id")
-        admin_parsed_mapping = {}
-
-try:
-    ADMIN_CHAT_IDS: dict[str, int] = {str(k): int(v) for k, v in dict(admin_parsed_mapping).items()}
-except Exception:
-    logging.error("ADMIN_CHAT_IDS contains non-numeric chat ids; please use integers (e.g., -1001234567890)")
-    ADMIN_CHAT_IDS = {}
+    logging.error("OWNER_IDS must be a comma-separated list of Telegram user ids (e.g., 230720971)")
+    OWNER_IDS = set()
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TELEGRAM_KEY)
@@ -75,15 +66,52 @@ def resolve_chat_building(chat_id: int) -> str | None:
     return None
 
 
-def resolve_building_admin_chat_id(building: str) -> int | None:
-    return ADMIN_CHAT_IDS.get(building)
+def build_building_keyboard() -> InlineKeyboardBuilder:
+    keyboard = InlineKeyboardBuilder()
+    for building_name in GROUP_CHAT_IDS:
+        keyboard.button(
+            text=building_name,
+            callback_data=f"building_{building_name}"
+        )
+    keyboard.adjust(4)
+    return keyboard
 
 
-def resolve_admin_chat_building(chat_id: int) -> str | None:
-    for building_name, configured_chat_id in ADMIN_CHAT_IDS.items():
-        if configured_chat_id == chat_id:
-            return building_name
-    return None
+async def is_chat_admin(chat_id: int, user_id: int) -> bool:
+    try:
+        member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
+        return getattr(member, "status", None) in ["administrator", "creator"]
+    except Exception as err:
+        logging.info(f"Admin check failed for user {user_id} in chat {chat_id}: {err}")
+        return False
+
+
+async def can_use_admin_commands(message: Message) -> bool:
+    # Anonymous admins post on behalf of the group itself
+    if message.sender_chat is not None and message.sender_chat.id == message.chat.id:
+        return True
+    if message.from_user is None:
+        return False
+    if message.from_user.id in OWNER_IDS:
+        return True
+    return await is_chat_admin(message.chat.id, message.from_user.id)
+
+
+def format_user_name(user: types.User) -> str:
+    full_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or "Сосед"
+    return f"{full_name} (@{user.username})" if user.username else full_name
+
+
+async def answer_admin_privately(message: Message, text: str) -> None:
+    # Anonymous admins act on behalf of the group and have no personal chat with the bot
+    if message.sender_chat is None and message.from_user is not None:
+        try:
+            await bot.send_message(chat_id=message.from_user.id, text=text)
+            return
+        except Exception as err:
+            logging.info(f"Could not answer admin {message.from_user.id} privately: {err}")
+            text += "\n\nЧтобы получать ответы бота в личных сообщениях, откройте диалог с ботом и отправьте /start"
+    await message.answer(text)
 
 
 async def is_user_in_building_chat(building: str, user_id: int) -> bool:
@@ -181,18 +209,17 @@ async def on_join_chat(callback: types.CallbackQuery, state: FSMContext):
 # Message: consent response → ask for building or decline
 @dp.message(JoinChat.consent_share_flat, F.text.in_(["✅ Согласен"]))
 async def on_consent_yes(message: Message, state: FSMContext):
-    keyboard = InlineKeyboardBuilder()
-    building_names = ["2", "2к1", "2к4", "2к5"]
-    for building_name in building_names:
-        keyboard.button(
-            text=building_name,
-            callback_data=f"building_{building_name}"
+    if not GROUP_CHAT_IDS:
+        await state.clear()
+        await message.answer(
+            "К сожалению, сейчас не подключен ни один чат дома. Свяжитесь с администратором @xmlChay (Илья)."
         )
-    keyboard.adjust(4)
+        return
+
     await state.set_state(JoinChat.selecting_building)
     await message.answer(
         "Выберите дом, который вас интересует:",
-        reply_markup=keyboard.as_markup()
+        reply_markup=build_building_keyboard().as_markup()
     )
 
 
@@ -218,22 +245,14 @@ async def on_consent_invalid(message: Message):
 @dp.callback_query(JoinChat.selecting_building, F.data.startswith("building_"))
 async def on_building_selected(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
-    selected = callback.data.split("_")[-1]
+    selected = callback.data.split("_", 1)[1]
 
-    # If building is not supported, keep selection and inform the user
+    # Config may have changed since the keyboard was sent
     if resolve_building_chat_id(selected) is None:
-        keyboard = InlineKeyboardBuilder()
-        building_names = ["2", "2к1", "2к4", "2к5"]
-        for building_name in building_names:
-            keyboard.button(
-                text=building_name,
-                callback_data=f"building_{building_name}"
-            )
-        keyboard.adjust(4)
         await state.set_state(JoinChat.selecting_building)
         await callback.message.edit_text(
             f"К сожалению, дом {selected} пока не поддерживается. Выберите другой дом:",
-            reply_markup=keyboard.as_markup()
+            reply_markup=build_building_keyboard().as_markup()
         )
         return
 
@@ -324,19 +343,22 @@ async def on_flat_number_invalid(message: Message):
     await message.answer("Пожалуйста, укажите корректный номер квартиры")
 
 
-# /flat: show users bound to a flat (admin chats only)
+# /flat: show users bound to a flat (building chats, admins only)
 @dp.message(Command("flat"))
 async def handle_flat_command(message: Message):
-    # Restrict to admin chats only
-    admin_building = resolve_admin_chat_building(message.chat.id)
-    if not admin_building:
+    # Restrict to configured building chats
+    building = resolve_chat_building(message.chat.id)
+    if not building:
+        return
+
+    if not await can_use_admin_commands(message):
         return
 
     # Parse flat number from command arguments
     # Expected formats:
     #   /flat 123
     #   /flat@bot 123
-    args_text = message.text.split(maxsplit=1)
+    args_text = (message.text or message.caption or "").split(maxsplit=1)
     if len(args_text) < 2 or not args_text[1].strip().isdigit():
         await message.answer("Укажите номер квартиры: например, /flat 123")
         return
@@ -349,7 +371,7 @@ async def handle_flat_command(message: Message):
             supabase
             .table("users")
             .select("*")
-            .eq("building", admin_building)
+            .eq("building", building)
             .eq("flat_number", flat_number)
             .execute()
         )
@@ -357,7 +379,7 @@ async def handle_flat_command(message: Message):
         if not result.data:
             await message.answer(
                 "Данные не найдены в базе\n\n"
-                f"Дом: {admin_building}\n"
+                f"Дом: {building}\n"
                 f"Квартира: {flat_number}"
             )
             return
@@ -366,7 +388,7 @@ async def handle_flat_command(message: Message):
         lines = [
             "ℹ️ Данные по квартире",
             "",
-            f"Дом: {admin_building}",
+            f"Дом: {building}",
             f"Квартира: {flat_number}",
             "",
             "Пользователи:",
@@ -390,6 +412,68 @@ async def handle_flat_command(message: Message):
         await message.answer("Произошла ошибка при получении данных. Попробуйте позже или обратитесь к разработчику @xmlChay (Илья)")
 
 
+# /kick: remove a user from the chat by Telegram ID (building chats, admins only)
+@dp.message(Command("kick"))
+async def handle_kick_command(message: Message):
+    # Restrict to configured building chats
+    building = resolve_chat_building(message.chat.id)
+    if not building:
+        return
+
+    if not await can_use_admin_commands(message):
+        return
+
+    # Parse Telegram ID from command arguments
+    # Expected formats:
+    #   /kick 123456789
+    #   /kick@bot 123456789
+    args_text = (message.text or message.caption or "").split(maxsplit=1)
+    if len(args_text) < 2 or not args_text[1].strip().isdigit():
+        await answer_admin_privately(message, "Укажите Telegram ID пользователя: например, /kick 123456789")
+        return
+
+    target_id = int(args_text[1].strip())
+
+    if target_id == bot.id:
+        await answer_admin_privately(message, "Я не могу исключить самого себя")
+        return
+
+    try:
+        target = await bot.get_chat_member(chat_id=message.chat.id, user_id=target_id)
+    except Exception as err:
+        logging.info(f"/kick: cannot get member {target_id} in chat {message.chat.id}: {err}")
+        await answer_admin_privately(message, f"Пользователь с ID {target_id} не найден в чате дома {building}")
+        return
+
+    target_status = getattr(target, "status", None)
+    if target_status in ["left", "kicked"]:
+        await answer_admin_privately(message, f"Пользователь с ID {target_id} не состоит в чате дома {building}")
+        return
+    if target_status in ["administrator", "creator"]:
+        await answer_admin_privately(
+            message,
+            f"Нельзя исключить администратора чата дома {building}. Сначала снимите с него права"
+        )
+        return
+
+    target_name = format_user_name(target.user)
+
+    try:
+        # Ban and immediately unban, so the user is removed but can return later
+        await bot.ban_chat_member(chat_id=message.chat.id, user_id=target_id)
+        await bot.unban_chat_member(chat_id=message.chat.id, user_id=target_id, only_if_banned=True)
+    except Exception as err:
+        logging.error(f"/kick: failed to remove user {target_id} from chat {message.chat.id}: {err}")
+        await answer_admin_privately(
+            message,
+            "Не удалось исключить пользователя. Проверьте, что у бота есть право удалять участников"
+        )
+        return
+
+    logging.info(f"/kick: user {target_name} (ID: {target_id}) removed from chat {message.chat.id} ({building}).")
+    await answer_admin_privately(message, f"🚫 Пользователь {target_name} исключен из чата дома {building}")
+
+
 # Chat member update handler - detect when users leave the group
 @dp.chat_member()
 async def on_chat_member_update(update: ChatMemberUpdated):
@@ -397,15 +481,16 @@ async def on_chat_member_update(update: ChatMemberUpdated):
     if update.chat.id not in GROUP_CHAT_IDS.values():
         return
     
-    # Check if user left the chat
-    if update.old_chat_member.status in ["member", "administrator", "creator"] and update.new_chat_member.status == "left":
+    # Check if user is no longer in the chat, whether they left or were removed
+    if update.old_chat_member.status in ["member", "administrator", "creator"] and update.new_chat_member.status in ["left", "kicked"]:
         building = resolve_chat_building(update.chat.id)
         if building is None:
             return
 
         # The affected user is the one in new_chat_member
         user_id = update.new_chat_member.user.id
-        username = update.new_chat_member.user.username or "Unknown"
+        user_name = format_user_name(update.new_chat_member.user)
+        first_name = update.new_chat_member.user.first_name or "Сосед"
         
         try:
             # Get all flats for this user in this building only
@@ -423,7 +508,7 @@ async def on_chat_member_update(update: ChatMemberUpdated):
                 supabase.table("users").delete().eq("telegram_id", user_id).eq("building", building).execute()
                 
                 logging.info(
-                    f"User {username} (ID: {user_id}) left chat {update.chat.id} ({building}). "
+                    f"User {user_name} (ID: {user_id}) is no longer in chat {update.chat.id} ({building}). "
                     f"Removed {len(user_flats.data)} flat(s) for this building from database."
                 )
                 
@@ -431,7 +516,7 @@ async def on_chat_member_update(update: ChatMemberUpdated):
                 try:
                     await bot.send_message(
                         chat_id=user_id,
-                        text=f"👋 {username or 'Пользователь'}, вы покинули чат соседей по дому {building}.\n\n"
+                        text=f"👋 {first_name}, вы больше не состоите в чате соседей по дому {building}.\n\n"
                              f"Ваши данные по этому дому ({len(user_flats.data)} квартир(а)) были удалены из базы данных "
                              f"в соответствии с политикой конфиденциальности.\n\n"
                              f"Если вы захотите вернуться в чат, просто начните заново с команды /start"
@@ -450,49 +535,36 @@ async def on_chat_member_update(update: ChatMemberUpdated):
             return
 
         user_id = update.new_chat_member.user.id
-        username = update.new_chat_member.user.username or "Unknown"
-        first_name = update.new_chat_member.user.first_name or "Unknown"
-        last_name = update.new_chat_member.user.last_name or ""
+        display_name = format_user_name(update.new_chat_member.user)
 
+        # Track registrations so admins can spot joins made outside the bot
         try:
-            # Fetch user data for this building, if any
             user_flats = (
                 supabase
                 .table("users")
-                .select("*")
+                .select("id")
                 .eq("telegram_id", user_id)
                 .eq("building", building)
                 .execute()
             )
-
-            admin_chat_id = resolve_building_admin_chat_id(building)
-            if not admin_chat_id:
-                return
-
-            if user_flats.data:
-                flats_lines = []
-                for rec in user_flats.data:
-                    flat_no = rec.get("flat_number", "—")
-                    flats_lines.append(f"Квартира: {flat_no}")
-                flats_text = "\n".join(flats_lines)
-                msg = (
-                    "✅ Пользователь присоединился к чату\n\n"
-                    f"Дом: {building}\n"
-                    f"Пользователь: @{username if username != 'Unknown' else '—'} (ID: {user_id})\n"
-                    f"Имя: {first_name} {last_name}".strip() + "\n\n"
-                    f"Данные: \n{flats_text}"
+            if not user_flats.data:
+                logging.warning(
+                    f"User {display_name} (ID: {user_id}) joined chat {update.chat.id} ({building}) "
+                    f"without a record in the database."
                 )
-            else:
-                msg = (
-                    "ℹ️ Пользователь присоединился к чату, но данные не найдены в базе\n\n"
-                    f"Дом: {building}\n"
-                    f"Пользователь: @{username if username != 'Unknown' else '—'} (ID: {user_id})\n"
-                    f"Имя: {first_name} {last_name}".strip()
-                )
-
-            await bot.send_message(chat_id=admin_chat_id, text=msg)
         except Exception as e:
-            logging.error(f"Error notifying admins about user join: {e}")
+            logging.error(f"Error checking registration of joined user: {e}")
+
+        try:
+            await bot.send_message(
+                chat_id=update.chat.id,
+                text=(
+                    f"✅ Пользователь {display_name} присоединился(-ась) к чату\n\n"
+                    "Добро пожаловать! Пожалуйста, уважайте своих соседей и не используйте чат для рекламы"
+                )
+            )
+        except Exception as e:
+            logging.error(f"Error welcoming user in chat: {e}")
 
 
 # /revoke: user-initiated data deletion (private only)
