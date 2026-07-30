@@ -41,6 +41,24 @@ except Exception:
     logging.error("GROUP_CHAT_IDS contains non-numeric chat ids; please use integers (e.g., -1001234567890)")
     GROUP_CHAT_IDS = {}
 
+# Building council chats: receive detailed join notifications. Same format as GROUP_CHAT_IDS
+COUNCIL_CHAT_IDS_RAW = os.environ.get("COUNCIL_CHAT_IDS", "{}")
+try:
+    council_parsed_mapping = json.loads(COUNCIL_CHAT_IDS_RAW)
+except Exception:
+    try:
+        import ast
+        council_parsed_mapping = ast.literal_eval(COUNCIL_CHAT_IDS_RAW)
+    except Exception:
+        logging.error("Failed to parse COUNCIL_CHAT_IDS env variable. Provide JSON or Python dict mapping of building->chat_id")
+        council_parsed_mapping = {}
+
+try:
+    COUNCIL_CHAT_IDS: dict[str, int] = {str(k): int(v) for k, v in dict(council_parsed_mapping).items()}
+except Exception:
+    logging.error("COUNCIL_CHAT_IDS contains non-numeric chat ids; please use integers (e.g., -1001234567890)")
+    COUNCIL_CHAT_IDS = {}
+
 # Shared chat for the whole complex, offered on top of the building chat
 PUBLIC_CHAT_ID_RAW = os.environ.get("PUBLIC_CHAT_ID", "").strip()
 try:
@@ -80,6 +98,10 @@ def resolve_chat_building(chat_id: int) -> str | None:
         if configured_chat_id == chat_id:
             return building_name
     return None
+
+
+def resolve_building_council_chat_id(building: str) -> int | None:
+    return COUNCIL_CHAT_IDS.get(building)
 
 
 def all_connected_chat_ids() -> list[int]:
@@ -651,15 +673,21 @@ async def on_chat_member_update(update: ChatMemberUpdated):
     # Check if user joined the chat
     if update.old_chat_member.status in ["left", "kicked"] and update.new_chat_member.status in ["member", "administrator", "creator"]:
         building = resolve_chat_building(update.chat.id)
-        user_id = update.new_chat_member.user.id
-        display_name = format_user_name(update.new_chat_member.user)
+        joined_user = update.new_chat_member.user
+        user_id = joined_user.id
+        display_name = format_user_name(joined_user)
+        username = joined_user.username or "Unknown"
+        first_name = joined_user.first_name or "Unknown"
+        last_name = joined_user.last_name or ""
 
         # Track registrations so admins can spot joins made outside the bot
+        user_flats = None
         try:
-            registration_query = supabase.table("users").select("id").eq("telegram_id", user_id)
+            registration_query = supabase.table("users").select("*").eq("telegram_id", user_id)
             if building is not None:
                 registration_query = registration_query.eq("building", building)
-            if not registration_query.execute().data:
+            user_flats = registration_query.execute()
+            if not user_flats.data:
                 logging.warning(
                     f"User {display_name} (ID: {user_id}) joined {resolve_chat_title(update.chat.id)} "
                     f"({update.chat.id}) without a record in the database."
@@ -677,6 +705,35 @@ async def on_chat_member_update(update: ChatMemberUpdated):
             )
         except Exception as e:
             logging.error(f"Error welcoming user in chat {update.chat.id} ({resolve_chat_title(update.chat.id)}): {e}")
+
+        # Detailed notification for the building council, if that chat is configured
+        if building is not None:
+            council_chat_id = resolve_building_council_chat_id(building)
+            if council_chat_id is not None:
+                try:
+                    if user_flats and user_flats.data:
+                        flats_lines = [
+                            f"Квартира: {rec.get('flat_number', '—')}"
+                            for rec in user_flats.data
+                        ]
+                        flats_text = "\n".join(flats_lines)
+                        council_msg = (
+                            "✅ Пользователь присоединился к чату\n\n"
+                            f"Дом: {building}\n"
+                            f"Пользователь: @{username if username != 'Unknown' else '—'} (ID: {user_id})\n"
+                            f"Имя: {first_name} {last_name}".strip() + "\n\n"
+                            f"Данные: \n{flats_text}"
+                        )
+                    else:
+                        council_msg = (
+                            "ℹ️ Пользователь присоединился к чату, но данные не найдены в базе\n\n"
+                            f"Дом: {building}\n"
+                            f"Пользователь: @{username if username != 'Unknown' else '—'} (ID: {user_id})\n"
+                            f"Имя: {first_name} {last_name}".strip()
+                        )
+                    await bot.send_message(chat_id=council_chat_id, text=council_msg)
+                except Exception as e:
+                    logging.error(f"Error notifying council of building {building}: {e}")
 
 
 # /revoke: user-initiated data deletion (private only)
@@ -744,8 +801,8 @@ async def revoke_confirm(callback: types.CallbackQuery):
 
 async def main():
     logging.info(
-        "Effective configuration: buildings=%s, building chats=%s, public chat=%s, owners=%s",
-        BUILDINGS, GROUP_CHAT_IDS, PUBLIC_CHAT_ID, sorted(OWNER_IDS)
+        "Effective configuration: buildings=%s, building chats=%s, council chats=%s, public chat=%s, owners=%s",
+        BUILDINGS, GROUP_CHAT_IDS, COUNCIL_CHAT_IDS, PUBLIC_CHAT_ID, sorted(OWNER_IDS)
     )
     await dp.start_polling(bot)
 
