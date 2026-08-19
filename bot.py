@@ -7,6 +7,7 @@ from aiogram.filters import CommandStart, Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
+from aiogram.exceptions import TelegramMigrateToChat
 import asyncio
 import logging
 import os
@@ -732,6 +733,11 @@ async def on_chat_member_update(update: ChatMemberUpdated):
                             f"Имя: {first_name} {last_name}".strip()
                         )
                     await bot.send_message(chat_id=council_chat_id, text=council_msg)
+                except TelegramMigrateToChat as e:
+                    logging.error(
+                        f"Error notifying council of building {building}: chat {council_chat_id} "
+                        f"was upgraded to a supergroup. Update COUNCIL_CHAT_IDS to {e.migrate_to_chat_id}"
+                    )
                 except Exception as e:
                     logging.error(f"Error notifying council of building {building}: {e}")
 
